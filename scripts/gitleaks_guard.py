@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 
 
 GITLEAKS_VERSION = "8.30.1"
+SOURCE_BASE_SHA = "45c35e40c46166dc726ccc52f5d27f40f2449f99"
 REVISION_RANGE = re.compile(r"(?:[0-9a-fA-F]{40}|HEAD)(?:\.\.(?:[0-9a-fA-F]{40}|HEAD))?\Z")
 KEY_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore")
 DATA_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3-journal")
@@ -30,7 +31,7 @@ def git(*args: str) -> bytes:
 
 def protected_path(path: str) -> bool:
     parts = PurePosixPath(path).parts
-    if parts[0] in {".codegraph", "graphify-out"} or ".aws" in parts:
+    if parts[0] in {".codegraph", "graphify-out", ".agentmemory"} or ".aws" in parts:
         return True
     name = parts[-1].lower()
     if name == ".env" or (".env." in name and not name.endswith((".env.example", ".env.sample", ".env.template"))):
@@ -44,6 +45,13 @@ def protected_path(path: str) -> bool:
 
 def decode_paths(output: bytes) -> list[str]:
     return [name.decode("utf-8", "surrogateescape") for name in output.split(b"\0") if name]
+
+
+def bounded_range(revision: str) -> str:
+    if ".." in revision:
+        return revision
+    git("merge-base", "--is-ancestor", SOURCE_BASE_SHA, revision)
+    return f"{SOURCE_BASE_SHA}..{revision}"
 
 
 def changed_blobs(mode: str, revision_range: str | None) -> set[tuple[str, str]]:
@@ -124,7 +132,7 @@ def scan(scanner: str, mode: str, revision: str | None) -> int:
             root = Path(temporary)
             findings = []
             if mode != "tag":
-                target = ["--staged", "."] if mode == "staged" else ["--log-opts", revision or "", "."]
+                target = ["--staged", "."] if mode == "staged" else ["--log-opts", f"--diff-merges=first-parent {revision}", "."]
                 findings.extend(invoke_scanner(scanner, "git", target, root / "git-report.json"))
 
             messages = root / "messages"
@@ -132,8 +140,21 @@ def scan(scanner: str, mode: str, revision: str | None) -> int:
             if mode == "range":
                 for commit in git("rev-list", revision or "").decode("ascii").splitlines():
                     (messages / f"commit-{commit}.txt").write_bytes(git("show", "-s", "--format=%B", commit))
-            elif mode == "tag" and git("cat-file", "-t", revision or "").strip() == b"tag":
-                (messages / f"tag-{revision}.txt").write_bytes(git("cat-file", "-p", revision or ""))
+            elif mode == "tag":
+                tag_object = revision or ""
+                seen = set()
+                while git("cat-file", "-t", tag_object).strip() == b"tag":
+                    if tag_object in seen:
+                        raise RuntimeError("Tag object cycle")
+                    seen.add(tag_object)
+                    payload = git("cat-file", "-p", tag_object)
+                    match = re.match(rb"object ([0-9a-f]{40})\n", payload)
+                    if match is None:
+                        raise RuntimeError("Tag object malformed")
+                    (messages / f"tag-{tag_object}.txt").write_bytes(payload)
+                    tag_object = match.group(1).decode("ascii")
+                if git("cat-file", "-t", tag_object).strip() != b"commit":
+                    raise RuntimeError("Tag target is not a commit")
 
             if any(messages.iterdir()):
                 for finding in invoke_scanner(scanner, "dir", [str(messages)], root / "message-report.json"):
@@ -176,6 +197,8 @@ def main() -> int:
         if Path.cwd().resolve() != root:
             print("Git root mismatch", file=sys.stderr)
             return 2
+        if mode == "range" and revision is not None:
+            revision = bounded_range(revision)
         changed = changed_blobs(mode, revision) if mode != "tag" else set()
         blocked = {path for path, _ in changed if protected_path(path)}
         if not blocked:
