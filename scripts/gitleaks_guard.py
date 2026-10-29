@@ -125,21 +125,25 @@ def print_findings(findings: list[dict]) -> int:
     return 1 if rows else 0
 
 
-def scan(scanner: str, mode: str, revision: str | None) -> int:
+def scan(scanner: str, mode: str, revision: str | None, changed_paths: set[str]) -> int:
     os.umask(0o077)
     try:
         with tempfile.TemporaryDirectory(prefix="omp-gitleaks-") as temporary:
             root = Path(temporary)
             findings = []
-            if mode != "tag":
+            if mode in {"staged", "range"}:
                 target = ["--staged", "."] if mode == "staged" else ["--log-opts", f"--diff-merges=first-parent {revision}", "."]
                 findings.extend(invoke_scanner(scanner, "git", target, root / "git-report.json"))
 
             messages = root / "messages"
             messages.mkdir()
+            if changed_paths:
+                (messages / "paths.txt").write_bytes(b"\n".join(os.fsencode(path) for path in sorted(changed_paths)) + b"\n")
+            if mode == "ref":
+                (messages / "ref.txt").write_bytes(os.fsencode(revision or "") + b"\n")
             if mode == "range":
                 for commit in git("rev-list", revision or "").decode("ascii").splitlines():
-                    (messages / f"commit-{commit}.txt").write_bytes(git("show", "-s", "--format=%B", commit))
+                    (messages / f"commit-{commit}.txt").write_bytes(git("cat-file", "commit", commit))
             elif mode == "tag":
                 tag_object = revision or ""
                 seen = set()
@@ -163,6 +167,10 @@ def scan(scanner: str, mode: str, revision: str | None) -> int:
                         label = "commit:" + name[7:-4]
                     elif name.startswith("tag-") and name.endswith(".txt"):
                         label = "tag:" + name[4:-4]
+                    elif name == "paths.txt":
+                        label = "paths"
+                    elif name == "ref.txt":
+                        label = "ref"
                     else:
                         raise RuntimeError("Gitleaks message report malformed")
                     findings.append({**finding, "File": label})
@@ -173,14 +181,16 @@ def scan(scanner: str, mode: str, revision: str | None) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in {2, 3} or sys.argv[1] not in {"staged", "range", "tag"}:
-        print("usage: gitleaks_guard.py staged | range REVISION_RANGE | tag TAG_OBJECT_SHA", file=sys.stderr)
+    if len(sys.argv) not in {2, 3} or sys.argv[1] not in {"staged", "range", "tag", "ref"}:
+        print("usage: gitleaks_guard.py staged | range REVISION_RANGE | tag TAG_OBJECT_SHA | ref REFNAME", file=sys.stderr)
         return 2
     mode = sys.argv[1]
     revision = sys.argv[2] if len(sys.argv) == 3 else None
     valid_revision = (mode == "staged" and revision is None) or (
         mode == "range" and revision is not None and REVISION_RANGE.fullmatch(revision)
-    ) or (mode == "tag" and revision is not None and re.fullmatch(r"[0-9a-fA-F]{40}", revision))
+    ) or (mode == "tag" and revision is not None and re.fullmatch(r"[0-9a-fA-F]{40}", revision)) or (
+        mode == "ref" and revision is not None and 0 < len(revision) <= 4096
+    )
     if not valid_revision:
         print("Invalid revision range", file=sys.stderr)
         return 2
@@ -199,7 +209,7 @@ def main() -> int:
             return 2
         if mode == "range" and revision is not None:
             revision = bounded_range(revision)
-        changed = changed_blobs(mode, revision) if mode != "tag" else set()
+        changed = changed_blobs(mode, revision) if mode in {"staged", "range"} else set()
         blocked = {path for path, _ in changed if protected_path(path)}
         if not blocked:
             blocked = {path for path, blob in changed if has_sqlite_header(blob)}
@@ -209,7 +219,7 @@ def main() -> int:
     if blocked:
         print(f"Protected path(s): {len(blocked)}")
         return 1
-    return scan(scanner, mode, revision)
+    return scan(scanner, mode, revision, {path for path, _ in changed})
 
 
 if __name__ == "__main__":

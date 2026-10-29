@@ -93,6 +93,26 @@ class GitleaksGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
 
+    def test_staged_filename_only_secret_is_blocked(self):
+        name = f"api_key={SYNTHETIC_SECRET}.txt"
+        (self.repo / name).write_text("harmless\n")
+        self.git("add", name)
+
+        result = self.guard("staged")
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
+
+    def test_staged_quoted_password_with_spaces_and_apostrophe_is_blocked(self):
+        secret = "synthetic horse's battery staple value 2026"
+        (self.repo / "note.txt").write_text(f'password = "{secret}"\n')
+        self.git("add", "note.txt")
+
+        result = self.guard("staged")
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+
     def test_secret_in_protected_filename_is_not_echoed(self):
         name = f".env.{SYNTHETIC_SECRET}"
         (self.repo / name).write_text("HARMLESS=value\n")
@@ -279,6 +299,38 @@ class GitleaksGuardTest(unittest.TestCase):
         self.assertIn("omp-credential-assignment", result.stdout)
         self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
 
+    def test_range_catches_secret_in_commit_author(self):
+        base = self.git("rev-parse", "HEAD")
+        author = f'api_key = "{SYNTHETIC_SECRET}" <synthetic@example.invalid>'
+        self.git("commit", "--quiet", "--allow-empty", f"--author={author}", "-m", "clean")
+
+        result = self.guard("range", f"{base}..HEAD")
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
+
+    def test_range_catches_filename_only_secret(self):
+        base = self.git("rev-parse", "HEAD")
+        name = f"api_key={SYNTHETIC_SECRET}.txt"
+        (self.repo / name).write_text("harmless\n")
+        self.git("add", name)
+        self.git("commit", "--quiet", "-m", "clean")
+
+        result = self.guard("range", f"{base}..HEAD")
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
+
+    def test_slash_bearing_ref_name_secret_is_blocked(self):
+        secret = "synthetic/credential-value-2026"
+        ref = f"refs/tags/api_key={secret}"
+        self.git("check-ref-format", ref)
+
+        result = self.guard("ref", ref)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+
     def test_missing_scanner_fails_closed(self):
         result = self.guard("staged", path="/usr/bin:/bin")
 
@@ -320,6 +372,41 @@ class GitleaksGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("Gitleaks blocked", result.stderr)
+        self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
+
+    def test_pre_push_hook_catches_lightweight_tag_name_secret(self):
+        self.use_pinned_source()
+        self.git("config", "--local", "core.hooksPath", str(ROOT / ".githooks"))
+        remote = self.repo / "remote.git"
+        subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True, capture_output=True)
+        subprocess.run(["git", "--git-dir", str(remote), "config", "receive.shallowUpdate", "true"], check=True, capture_output=True)
+        self.git("remote", "add", "origin", str(remote))
+        tag = f"api_key={SYNTHETIC_SECRET}"
+        self.git("tag", tag)
+
+        result = subprocess.run(
+            ["git", "push", "origin", f"refs/tags/{tag}"], cwd=self.repo, capture_output=True, text=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
+
+    def test_pre_push_hook_catches_destination_branch_name_secret(self):
+        self.use_pinned_source()
+        self.git("config", "--local", "core.hooksPath", str(ROOT / ".githooks"))
+        remote = self.repo / "remote.git"
+        subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True, capture_output=True)
+        subprocess.run(["git", "--git-dir", str(remote), "config", "receive.shallowUpdate", "true"], check=True, capture_output=True)
+        self.git("remote", "add", "origin", str(remote))
+        branch = f"api_key={SYNTHETIC_SECRET}"
+
+        result = subprocess.run(
+            ["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=self.repo, capture_output=True, text=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertNotIn(SYNTHETIC_SECRET, result.stdout + result.stderr)
 
     def test_pre_push_hook_catches_annotated_tag_body(self):
