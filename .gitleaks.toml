@@ -1,0 +1,11 @@
+title = "OMP secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "omp-credential-assignment"
+description = "Credential literal assigned to a sensitive name"
+regex = '''(?i)(?:^|[^a-z0-9_])(?:[a-z][a-z0-9]*[_-]){0,4}(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret[_-]?key|password)\s*[:=]\s*['"]([a-z0-9_./+=-]{20,})['"]'''
+secretGroup = 1
+keywords = ["key", "token", "secret", "password"]
