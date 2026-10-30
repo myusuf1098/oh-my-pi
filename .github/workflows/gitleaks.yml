@@ -1,0 +1,78 @@
+name: Secret scan
+
+on:
+  pull_request_target:
+    branches: [main, omp2]
+  push:
+    branches: [main, omp2]
+    tags: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha || 'main' }}
+      - name: Install Gitleaks
+        run: |
+          curl -fsSL --retry 3 --max-time 120 \
+            -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          printf '%s  %s\n' \
+            '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' \
+            "$RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan new commits with trusted policy
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = pull_request_target ]; then
+            base="$PR_BASE"
+            head="$PR_HEAD"
+            git fetch --no-tags origin "refs/pull/$PR_NUMBER/head" >/dev/null 2>&1
+            test "$(git rev-parse --verify FETCH_HEAD 2>/dev/null)" = "$head"
+          else
+            base="$PUSH_BEFORE"
+            head="$PUSH_AFTER"
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              git fetch origin "$GITHUB_REF" >/dev/null 2>&1
+              tag_object="$(git rev-parse --verify "$GITHUB_REF^{object}" 2>/dev/null)"
+              tag_commit="$(git rev-parse --verify "$GITHUB_REF^{commit}" 2>/dev/null)"
+              if [ "$head" != "$tag_object" ] && [ "$head" != "$tag_commit" ]; then
+                exit 1
+              fi
+            else
+              git fetch --no-tags origin "$head" >/dev/null 2>&1
+            fi
+          fi
+          git cat-file -e "$head^{commit}" 2>/dev/null
+          if [ "$base" = 0000000000000000000000000000000000000000 ]; then
+            range="$head"
+          else
+            git cat-file -e "$base^{commit}" 2>/dev/null
+            range="$base..$head"
+          fi
+          PATH="$RUNNER_TEMP:$PATH" python3 scripts/gitleaks_guard.py range "$range"
+          if [ "$GITHUB_EVENT_NAME" = pull_request_target ]; then
+            PATH="$RUNNER_TEMP:$PATH" python3 scripts/gitleaks_guard.py ref "refs/heads/$PR_HEAD_REF"
+          else
+            PATH="$RUNNER_TEMP:$PATH" python3 scripts/gitleaks_guard.py ref "$GITHUB_REF"
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if git cat-file -e "$GITHUB_REF^{tag}" 2>/dev/null; then
+              tag_sha="$(git rev-parse --verify "$GITHUB_REF^{tag}" 2>/dev/null)"
+              PATH="$RUNNER_TEMP:$PATH" python3 scripts/gitleaks_guard.py tag "$tag_sha"
+            fi
+          fi

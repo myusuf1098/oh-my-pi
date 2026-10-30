@@ -94,3 +94,6 @@ packages/coding-agent/bench/boot-baseline.json
 /.bazelrc.user
 
 .parity/
+/.codegraph/
+/graphify-out/
+/.agentmemory

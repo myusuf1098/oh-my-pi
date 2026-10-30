@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+	case "$local_sha" in
+		0000000000000000000000000000000000000000) continue ;;
+	esac
+	python3 "$(dirname "$0")/../scripts/gitleaks_guard.py" ref "$local_ref" || exit $?
+	python3 "$(dirname "$0")/../scripts/gitleaks_guard.py" ref "$remote_ref" || exit $?
+	case "$local_ref" in
+		refs/tags/*) python3 "$(dirname "$0")/../scripts/gitleaks_guard.py" tag "$local_sha" || exit $? ;;
+	esac
+	case "$remote_sha" in
+		0000000000000000000000000000000000000000) range=$local_sha ;;
+		*) range=$remote_sha..$local_sha ;;
+	esac
+	python3 "$(dirname "$0")/../scripts/gitleaks_guard.py" range "$range" || exit $?
+done
